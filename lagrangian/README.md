@@ -10,9 +10,9 @@ keeping the numerical core clean and allocation-free.
 | | |
 |---|---|
 | **Element** | 8-node hexahedron (Hex8), trilinear, 2×2×2 Gauss |
-| **Material** | J2 / von Mises, rate-independent, **combined linear isotropic + kinematic hardening** |
+| **Material** | J2 / von Mises, rate-independent, **linear isotropic + kinematic** hardening, and **nonlinear saturation (Voce) isotropic** hardening |
 | **Kinematics** | small strain *(default)* **and** finite strain (`F = Fᵉ·Fᵖ`, Hencky log-strain) + F-bar |
-| **Integration** | radial-return mapping with the **consistent algorithmic tangent** (quadratic Newton) |
+| **Integration** | radial-return mapping (closed form for linear hardening, scalar local Newton for saturation) with the **consistent algorithmic tangent** (quadratic Newton) |
 | **Global solve** | incremental Newton–Raphson; **direct** (small) or **CG + Algebraic Multigrid** (large), symmetry-aware auto-selection |
 | **Scale** | validated to **~10M DOFs** with linear `O(N)` memory & flops; threaded assembly + SpMV |
 | **Mesh** | structured box generator + predicate-based node/face selection |

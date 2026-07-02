@@ -656,7 +656,14 @@ examples (geometry, material, BCs, run, a printed diagnostic, a `.vtu`).
 - **Linear hardening only in v1.** The published Simo necking *curve* (PROPOSAL §8
   V3b) needs saturation hardening = a local Newton in `return_map` — the first
   post-v1 kernel upgrade, out of scope here; G6 uses the FEM's linear-hardening
-  material so the cross-check is apples-to-apples.
+  material so the cross-check is apples-to-apples. **UPDATE (delivered):**
+  saturation (Voce) hardening now lives in the shared kernel
+  (`lagrangian/src/Materials.jl`) and MPM reuses it stress-only — see
+  `examples/simo_necking_mpm.jl` (MPM) and `../lagrangian/examples/simo_necking_bar.jl`
+  (FEM). The MPM V3b uses a symmetry half-model to pin the neck at the notch
+  (a weak geometric seed can't fix the neck site at coarse resolution — the
+  driven-boundary artifact of G6 wins; a symmetry-plane constraint cannot be
+  overridden).
 
 **First implementation step:** Phase 0 — stand up the package with the `[sources]`
 reuse hook and pass G0 (B-spline partition of unity) and G1 (single-point ==
