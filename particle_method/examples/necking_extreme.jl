@@ -31,6 +31,16 @@
 # remains inside the driven node set. The grip band is narrow relative to
 # the gauge length so it does not interfere with the imperfection's necking.
 #
+# The FIXED end (x=0) does NOT get the same widening: it never moves, so
+# there is no detachment risk, and a first attempt at this example widened
+# it anyway (matching the driven end for symmetry) — that produced a clear,
+# spurious elevated-ᾱ band right at the edge of the artificially-wide fixed
+# region (a sharp, locally rigid-vs-free kinematic transition, the same
+# class of artifact as bent_rod.jl's, just self-inflicted here rather than
+# fixed). Reverted to the narrow, single-plane predicate (matching G6
+# exactly) once the cause was traced — widening a boundary that doesn't need
+# it doesn't help and actively hurts.
+#
 # Run:  julia --project=. examples/necking_extreme.jl
 # Output: necking_extreme.vtu — color by `EqPlasticStrain` for the localized
 # neck, `J` (det F) to see the volume-preservation of the isochoric flow.
@@ -78,7 +88,7 @@ T_hold = N_periods * Tnat
 vfun = t -> t <= T_ramp ? elong * (pi / (2T_ramp)) * sin(pi * t / T_ramp) : 0.0
 
 model = MPMModel(grid, pts, mat; dt=dt, fbar=true, damping=0.02, mass_scale=1.0)
-fix!(model, x -> x[1] < grip - 1e-9, :x)              # rigid grip band, root end
+fix!(model, x -> x[1] < 1e-9, :x)                     # narrow: x=0 never moves (see note above)
 fix!(model, x -> x[2] < 1e-9, :y)
 fix!(model, x -> x[3] < 1e-9, :z)
 prescribe!(model, x -> x[1] > L - grip - 1e-9, :x, vfun)   # rigid grip band, driven end,
