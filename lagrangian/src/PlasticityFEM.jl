@@ -42,8 +42,8 @@ export SolveResult
 export ElementKind, Hex8Small, Hex8Finite, Hex8FiniteFbar
 
 # Re-export selected internals useful for tests / advanced use.
-export return_map, precompute_cache, element_geometry, element_force_tangent!,
-       build_sparsity, assemble!, GaussState, DirichletBC, NeumannBC,
-       impose_dirichlet!, dof, Mesh, LinearSolveState
+export return_map, yield_stress, yield_slope, precompute_cache, element_geometry,
+       element_force_tangent!, build_sparsity, assemble!, GaussState, DirichletBC,
+       NeumannBC, impose_dirichlet!, dof, Mesh, LinearSolveState
 
 end # module
