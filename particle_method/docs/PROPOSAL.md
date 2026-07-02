@@ -8,6 +8,18 @@ document reviews the most relevant and highest-cited literature and proposes a
 concrete way to build the code, reusing the verified constitutive core of the
 [`../lagrangian/`](../lagrangian/) finite element solver.
 
+**Revision note.** This proposal was hardened after an adversarial review by a
+computational-plasticity reviewer. The central bet — reuse of the verified
+log-strain radial-return kernel, *stress-only*, in explicit MPM — was **confirmed
+sound and verified in the code**. The review corrected several items now folded in:
+(i) the Simo necking benchmark needs *saturation* hardening the current kernel
+lacks, and adding it is a real change (§8 V3, §2.3, §10); (ii) APIC makes MUSL
+redundant — use a single transfer (§0, §3, §4); (iii) prefer a **B-spline** grid
+basis with APIC over GIMP (§0, §4); (iv) the forward F-update is only first-order
+and not exactly isochoric (§2.1); (v) per-particle J≤0 guards, particle-state
+initialization, and grid contact/rigid-walls for Taylor/upsetting are on the
+critical path (§2.3, §3, §7).
+
 ---
 
 ## 0. Executive summary
@@ -39,13 +51,13 @@ already ours; MPM only changes the *spatial discretization*.
 | Concern | Baseline (build first) | Defer / upgrade to |
 |---|---|---|
 | Method | Explicit MPM | implicit/quasi-static MPM (Guilkey–Weiss 2003; iGIMP) |
-| Basis / shape functions | linear MPM → **GIMP** | **CPDI/CPDI2** for extreme stretch; B-spline for quadrature error |
-| Particle↔grid transfer | **APIC** (affine PIC) | MLS-MPM; PolyPIC |
-| Stress-update ordering | **MUSL** (robust) | USF (better energy) as an option |
-| Constitutive update | **reuse `lagrangian` finite-strain log-strain radial return** | nonlinear hardening; kinematic hardening |
-| Volumetric locking | cell-averaged **F̄ at particles** (Coombs 2018) | mixed u–p; B-spline F̄ |
-| Time step | CFL `Δt ≤ C·h/c` | precise Δt (Ni & Zhang 2020) |
-| Dimensions | 3D (2D axisymmetric option for benchmarks) | — |
+| Basis / shape functions | **quadratic B-spline** (also removes cell-crossing, cuts quadrature error, eases locking) | GIMP as alternative; **CPDI/CPDI2** for extreme stretch/folding |
+| Particle↔grid transfer | **APIC** (affine PIC), a *single* symplectic transfer | MLS-MPM; PolyPIC |
+| Stress-update ordering | USF/USL *timing* with the single APIC transfer | MUSL only on a fallback PIC/FLIP (non-APIC) path |
+| Constitutive update | reuse `lagrangian` log-strain radial return — **linear** hardening | **saturation/nonlinear hardening (local Newton on Δγ)** for the true Simo necking curve; kinematic hardening |
+| Volumetric locking | cell/patch-averaged **F̄ at particles** (Coombs 2018) | higher-order B-spline; nodal-pressure smoothing; mixed u–p |
+| Time step | CFL `Δt ≤ C·h/c`, `c=√((K+4G/3)/ρ)` (elastic P-wave; conservative under plastic softening) | precise Δt (Ni & Zhang 2020) |
+| Dimensions | **decide in Phase 0**: axisymmetric (natural for necking/Taylor) vs full-3D w/ symmetry-plane grid BCs | — |
 
 **Build approach.** Two viable routes (§6): (A) write our **own minimal explicit
 MPM** from scratch, reusing our constitutive kernel directly — matches this
@@ -70,9 +82,10 @@ very-large-deformation metal-plasticity literature (Taylor impact, forging).
 - **GIMP** (Bardenhagen & Kober 2004): particle characteristic functions give C¹
   effective shape functions → removes *cell-crossing noise* (the spurious
   force spikes from the C⁰ linear grid gradient when a particle crosses a cell).
-- **CPDI / CPDI2** (Sadeghirad, Brannon & Burghardt 2011, 2013): particle domains
-  *convect* with F → tracks massive stretch/rotation where GIMP domains degrade.
-  The enabler for extreme-deformation MPM.
+- **CPDI / CPDI2** (CPDI: Sadeghirad, Brannon & Burghardt 2011; CPDI2:
+  Sadeghirad, Brannon & **Guilkey** 2013): particle domains *convect* with F →
+  tracks massive stretch/rotation where GIMP domains degrade. The enabler for
+  extreme-deformation MPM.
 - **APIC** (Jiang, Schroeder, Selle, Teran & Stomakhin 2015; JCP 2017): an affine
   per-particle velocity mode → recovers FLIP's low dissipation *without* its noise
   and **conserves linear and angular momentum** with a lumped mass. Resolves the
@@ -111,6 +124,16 @@ return map to the identical small-strain algebra. Per particle, per step:
 6. Cauchy stress:     σ = τ / J,   J = det Fₙ₊₁
 ```
 
+**On step 1 — accuracy vs objectivity (do not conflate them).** Steps 2–6 are
+*exactly* incrementally objective *given* F — but that is a property of the stress
+map, not of the F-update. The forward form `Fₙ₊₁ = (I+Δt∇v)Fₙ` is only first-order,
+and for isochoric plastic flow (`tr ∇v = 0`) `det(I+Δt∇v) ≠ 1`, so it injects an
+O(Δt²) volume error that *accumulates* over the many thousands of explicit steps —
+exactly where locking/pressure is already delicate. Prefer the **total-F** storage
+form `bᵉ_tr = Fₙ₊₁ Cᵖ⁻¹ₙ Fₙ₊₁ᵀ` (as the kernel does) over the incremental
+`f·bᵉₙ·fᵀ`, and offer an exponential / mid-point (Hughes–Winget) F-update as the
+accurate option for quasi-static, many-step cases (necking).
+
 ### 2.2 What we already have
 `lagrangian/src/FiniteStrain.jl` implements steps 2–5 exactly:
 `finite_kinematics(F, Cᵖ⁻¹)` does 2–3, `return_map` (from `Materials.jl`) does 4,
@@ -128,6 +151,20 @@ per *particle*). It is allocation-free, `StaticArrays`-based, and FD-verified.
   *element-centroid* J₀; MPM F̄ uses a *cell-averaged* J (Coombs et al. 2018).
   Same idea, different averaging operator — a small new piece, not a reuse.
 - **Cauchy reporting** (`σ = τ/J`) and internal force (§3) are the MPM-side glue.
+- **Per-particle J≤0 guard is the MPM loop's job.** The `kin.ok` check lives in
+  the FEM *assembly* (`lagrangian/src/Elements.jl:447`), **not** in the kernel: if
+  `finite_kinematics` fails, `finite_stress_update` silently returns *zero stress*
+  and garbage `Cᵖ⁻¹`. The particle update must replicate that guard. MPM removes
+  *grid* entanglement, but each particle still integrates its own F and can still
+  hit J≤0 under extreme stretch — hence CPDI / particle splitting / J-guards.
+- **Particle state must be initialized:** `Cᵖ⁻¹ = I` (Voigt `[1,1,1,0,0,0]`),
+  `F = I`, `ᾱ = 0`, `β = 0`; a zero `Cᵖ⁻¹` makes `bᵉ_tr = 0` and the log singular.
+- **Call-once-then-commit.** The FEM calls the kernel on *trial* F each Newton
+  iteration, committing `Cᵖ⁻¹` only at convergence; explicit MPM calls once per
+  step from the previous committed `Cᵖ⁻¹ₙ` and stores the returned `Cᵖ⁻¹ₙ₊₁`.
+- **Decide which F feeds the F̄ pull-back.** Under F̄, the exp-map step 5 uses
+  `F⁻¹`; choose consistently whether that is the modified `F̄` or the true `F`
+  (the FEM feeds `F̄` to *both* kinematics and stress update, `Elements.jl:437–464`).
 
 **Consequence:** the verification we already trust (small-displacement limit,
 `det Fᵖ = 1`, objectivity) transfers with the kernel; a particle-level single-point
@@ -137,7 +174,7 @@ test is byte-for-byte the small-strain radial-return check.
 
 ## 3. The explicit MPM step (algorithm skeleton)
 
-Per time step (MUSL / "double-mapping" ordering shown; APIC transfers):
+Per time step (single APIC transfer; USF/USL stress-update timing):
 
 ```
 P2G  (particles → grid):
@@ -150,7 +187,7 @@ Grid solve (explicit):
 G2P  (grid → particles):
   vₚ      ← Σᵢ Sᵢ vᵢ*        (PIC part)   ;  Cₚ ← APIC affine reconstruction
   xₚ     += Δt Σᵢ Sᵢ vᵢ*
-  ∇vₚ     = Σᵢ vᵢ* ⊗ ∇Sᵢ(xₚ)   [MUSL: remap vₚ→grid once more, take ∇v from that]
+  ∇vₚ     = Σᵢ vᵢ* ⊗ ∇Sᵢ(xₚ)   (single APIC transfer — no MUSL second remap)
 Update (per particle, §2):
   Fₚ     ← (I + Δt ∇vₚ) Fₚ ;  (σₚ, Cᵖ⁻¹ₚ, ᾱₚ) ← finite stress update ;  Vₚ = Jₚ Vₚ⁰
 Reset the grid.
@@ -160,6 +197,12 @@ Reset the grid.
   course): `σₚ` is Cauchy; `fᵢⁱⁿᵗ = −Σₚ Vₚ σₚ ∇Sᵢ` is the discrete `∫σ:∇S dV`.
 - **BCs** are imposed on grid nodes (velocity/traction) — the same predicate-style
   UX as `lagrangian` can wrap this.
+- **Contact / rigid walls are separate machinery, on the critical path for V4/V5.**
+  Taylor impact needs a symmetry-plane wall with a *no-tension separation* release
+  (else the bar sticks); upsetting needs die contact (friction). Plain nodal
+  velocity BCs are **not** sufficient — use MPM nodal multi-body contact
+  (Bardenhagen et al. 2001) or an explicit rigid-wall algorithm; Sulsky & Schreyer
+  (1996), cited below, did exactly this through the grid.
 
 ---
 
@@ -168,20 +211,29 @@ Reset the grid.
 MPM's known failure modes and the accepted cures (Bardenhagen 2002; Steffen et al.
 2008; de Vaucorbeil 2020) — pick the baseline, keep the upgrade in reserve:
 
-- **Cell-crossing noise →** GIMP baseline; **CPDI/CPDI2** for extreme stretch.
+- **Cell-crossing noise →** **quadratic B-spline basis** (baseline; C¹, and it
+  simultaneously cuts quadrature error and eases locking — one change, three
+  fixes); GIMP is the alternative; **CPDI/CPDI2** for extreme stretch/folding.
 - **Ringing / null-space instability →** APIC transfers largely suppress it; a
-  local-SVD **null-space filter** (Gritton et al. 2017) is the fallback.
-- **Quadrature error (particle clustering) →** quadratic **B-spline** grid basis
-  (Steffen, Kirby & Berzins 2008) if accuracy demands.
-- **PIC dissipation vs FLIP noise →** **APIC** (the resolution).
-- **Volumetric locking (isochoric J2) →** cell-averaged **F̄ at particles**
-  (Coombs et al. 2018); this is the single most important numerical caveat for
-  metal J2 in MPM — plain linear MPM/GIMP will lock and show checkerboard pressure.
-- **Time step →** explicit CFL `Δt ≤ C·h/c`, `c = √((K+4G/3)/ρ)`, `C ≈ 0.1–0.5`,
-  global min over particles; refine with Ni & Zhang (2020) if needed.
-- **Stress-update ordering →** **MUSL** for robustness (double-mapping removes
-  USL node-velocity noise); expose **USF** (best energy conservation, Bardenhagen
-  2002) as an option for well-resolved cases.
+  local-SVD **null-space filter** (Gritton et al. 2017) is the fallback. (APIC's
+  affine moment matrix `Dₚ` is analytic/constant for B-splines — another reason to
+  prefer B-spline over GIMP, where `Dₚ` must be assembled and inverted per particle.)
+- **Quadrature error (particle clustering) →** covered by the **B-spline** grid
+  basis baseline (Steffen, Kirby & Berzins 2008).
+- **PIC dissipation vs FLIP noise →** **APIC** (the resolution) — and because APIC
+  already resolves this and conserves angular momentum, do **not** also stack MUSL.
+- **Volumetric locking (isochoric J2) →** cell/patch-averaged **F̄ at particles**
+  (Coombs et al. 2018); the single most important numerical caveat for metal J2 in
+  MPM — plain linear MPM/GIMP *will* lock and show checkerboard pressure. Weigh
+  higher-order B-spline MPM and nodal-pressure smoothing as alternatives/complements
+  (mixed u–p is the heavier fallback); F̄ is the baseline, not the only option.
+- **Time step →** explicit CFL `Δt ≤ C·h/c`, `c = √((K+4G/3)/ρ)` (elastic P-wave,
+  the fastest/correct speed; conservative since the plastic tangent speed is lower),
+  `C ≈ 0.1–0.5`, global min over particles; refine with Ni & Zhang (2020) if needed.
+- **Stress-update ordering →** with **APIC**, use a *single* transfer: MUSL's
+  second remap is redundant and would re-average the affine state APIC exists to
+  preserve. Choose USF vs USL *timing* only (Bardenhagen 2002); keep **MUSL** solely
+  for a fallback PIC/FLIP (non-APIC) path.
 
 ---
 
@@ -228,28 +280,39 @@ Grid (fixed background, reset each step):
 Material: reuse J2Material (E, ν, σy0, Hiso, Hkin) verbatim.
 ```
 
-Particle sampling (fill a geometry with material points, k per cell) is the new
-"mesh generator" analogue; `MaterialPointGenerator.jl` is a reference.
+Particle sampling (fill a geometry with material points, **baseline 8 PPC = 2³ per
+cell** in 3D) is the new "mesh generator" analogue; `MaterialPointGenerator.jl` is a
+reference. **Initialize** `F = I`, `Cᵖ⁻¹ = I` (`[1,1,1,0,0,0]`), `ᾱ = 0`, `β = 0`,
+`V = V₀`, `C = 0` at t=0 (§2.3).
 
 ---
 
 ## 7. Development phases (each gated by a benchmark)
 
-- **Phase 0 — design note + scaffolding.** Pin the baseline (this doc), lay out the
-  package (`ParticlePlasticity`?), particle/grid structs, reuse hooks into
-  `lagrangian` kernels, `.vtu` output.
-- **Phase 1 — explicit elastodynamics.** Linear/GIMP shapes, APIC transfers, MUSL,
+- **Phase 0 — design note + architectural decisions.** Pin the baseline (this doc),
+  lay out the package (`ParticlePlasticity`?), particle/grid structs, reuse hooks
+  into `lagrangian` kernels, `.vtu` output. **Decide now, not later:** axisymmetric
+  vs full-3D discretization (dictates hoop-strain/`1/r` weighting and BCs), and the
+  quasi-static loading strategy — mass scaling / dynamic relaxation with a
+  KE ≪ internal-energy check — for necking. These are architectural, not add-ons.
+- **Phase 1 — explicit elastodynamics.** B-spline shapes, a single APIC transfer,
   Neo-Hookean or St-Venant elastic. **Gate:** vibrating-bar dispersion/energy vs
-  analytic (Bardenhagen 2002; Steffen et al. 2008).
-- **Phase 2 — plug in J2.** Reuse `finite_kinematics`+`return_map` at particles.
-  **Gate:** single-particle uniaxial return-map == the small-strain closed form
-  (exact), and `det Fᵖ = 1`.
+  analytic, with explicit energy/momentum monitors (Bardenhagen 2002; Steffen et
+  al. 2008) — and a spinning-body test to *verify* APIC angular-momentum conservation.
+- **Phase 2 — plug in J2.** Reuse `finite_kinematics`+`return_map` at particles;
+  add the per-particle J≤0 guard and state init (§2.3). **Gate:** single-particle
+  uniaxial return-map == the small-strain closed form (exact), `det Fᵖ = 1`, **and**
+  a large-simple-shear test showing no Jaumann-type stress oscillation (stresses
+  the objectivity claim *and* the F-update accuracy of §2.1).
 - **Phase 3 — anti-locking + robustness.** F̄-at-particles (Coombs 2018); confirm
   APIC/GIMP suppress ringing/cell-crossing. **Gate:** no checkerboard pressure in
   fully-plastic flow.
 - **Phase 4 — large-deformation validation.** The benchmarks in §8; cross-check
   against the `lagrangian` FEM solver where they overlap (moderate necking), then
-  push past where the FEM mesh inverts.
+  push past where the FEM mesh inverts. **Prerequisite:** V3b (the true Simo curve)
+  needs saturation hardening (local Newton on Δγ) added to `return_map` first — a
+  real kernel upgrade, scheduled here, not in Phase 5. V3a (linear hardening) and
+  V4 (Taylor, perfectly plastic) need only the current kernel.
 - **Phase 5 (optional) — CPDI and/or GPU**, or migrate to Tesserae.jl.
 
 ---
@@ -261,19 +324,29 @@ Particle sampling (fill a geometry with material points, k per cell) is the new
 - **V2 — elastic vibrating bar.** Standing-wave dispersion + energy behavior;
   distinguishes USF (energy-conserving) from USL/MUSL (dissipative), per
   Bardenhagen (2002).
-- **V3 — necking of a round bar** (finite-strain J2, the shared benchmark with
-  `lagrangian`). Simo (1988) / Simo & Armero (1992): **R₀ = 6.413 mm, L₀ = 53.334
-  mm**, 1.8% mid-length radius imperfection (0.982 R₀), **E ≈ 206.9 GPa, ν ≈ 0.29,
-  σ_y0 = 450 MPa**, saturation hardening; total elongation **14 mm**. Compare
-  reaction–elongation and neck-radius reduction. Directly comparable to our
-  `lagrangian/examples/necking_titanium_bar.jl` setup.
-- **V4 — Taylor bar impact** (the canonical large-strain J2 dynamic test).
-  **Case A (recommended, Abaqus/Wilkins–Guinan):** copper, **L₀ = 32.4 mm, R₀ =
-  3.2 mm, v = 227 m/s, E = 110 GPa, ν = 0.3, ρ = 8970 kg/m³, σ_y = 314 MPa
-  (perfectly plastic)**; reference deformed **final length ≈ 21.4–21.5 mm**,
-  **mushroom foot radius ≈ 7 mm** (literature consensus — confirm against the
-  primary Wilkins–Guinan 1973 table). MPM references: Sulsky & Schreyer (1996);
-  Ma, Zhang & Huang (2009).
+- **V3 — necking of a round bar** (finite-strain J2). Geometry (both variants):
+  **R₀ = 6.413 mm, L₀ = 53.334 mm**, ~1.8% mid-length radius imperfection
+  (0.982 R₀), total elongation **14 mm**; compare reaction–elongation and neck-radius
+  reduction. **Two distinct materials — do not conflate them:**
+  - **V3a (baseline, linear hardening).** Cross-check against the FEM solver using
+    its *linear* constants (`lagrangian/examples/necking_titanium_bar.jl`,
+    "linearized hardening"). This the reused kernel does exactly, today.
+  - **V3b (the published Simo curve — deferred to the hardening upgrade).**
+    **E = 206.9 GPa, ν = 0.29, σ_y0 = 450 MPa** with **saturation hardening
+    σ_y(ᾱ) = σ_y0 + (σ_∞ − σ_y0)(1 − e^{−δᾱ}) + Hᾱ,  σ_∞ = 715 MPa, δ = 16.93,
+    H = 129.24 MPa** (Simo 1988; Simo & Armero 1992 — *verify vs primary source*).
+    This requires adding nonlinear hardening to `return_map` (a **local Newton on
+    Δγ**, replacing the closed form) — a real kernel change, not free reuse.
+- **V4 — Taylor bar impact** (canonical large-strain J2 dynamic test — a
+  *verification* / code-to-code benchmark, **not** physical validation).
+  **Case A (Abaqus/Wilkins–Guinan):** copper, **L₀ = 32.4 mm, R₀ = 3.2 mm,
+  v = 227 m/s, E = 110 GPa, ν = 0.3, ρ = 8970 kg/m³, σ_y = 314 MPa (elastic–
+  perfectly plastic)**; reference deformed **final length ≈ 21.4–21.5 mm**,
+  **mushroom foot radius ≈ 7 mm** (confirm against the primary Wilkins–Guinan 1973
+  table). "Pass" means *agreement with other perfectly-plastic solvers* — physical
+  copper at 227 m/s strain-hardens and heats (Johnson–Cook + thermal coupling, out
+  of baseline scope). Requires the grid rigid-wall/contact of §3. MPM references:
+  Sulsky & Schreyer (1996); Ma, Zhang & Huang (2009) — *verify Ma et al. vs source*.
 - **V5 — cylinder upsetting** (forging). Validated in Sulsky & Schreyer (1996);
   demonstrates die/workpiece contact via the grid — a capability the FEM solver
   lacks.
@@ -331,9 +404,14 @@ necking); Abaqus Benchmarks 1.3.10 (copper rod, Case A parameters).
 - **Taylor-bar reference numbers** (final length/foot radius) should be confirmed
   against the primary Wilkins–Guinan (1973) source before using as pass/fail
   targets; the parameter *inputs* (Case A) are confirmed.
-- **Scope discipline** (as in `lagrangian`): 3D Hex-grid MPM, J2 + linear
-  hardening, isotropic; defer contact-heavy forming, fracture/erosion, nonlinear
-  hardening, and GPU until the baseline validates.
+- **Scope discipline** (as in `lagrangian`): grid-based MPM, J2 + **linear**
+  hardening, isotropic for the baseline; defer contact-heavy forming, fracture/
+  erosion, and GPU. **Exception:** nonlinear/saturation hardening is *not* fully
+  deferrable — the published Simo necking curve (V3b) needs it (local Newton on
+  Δγ); schedule it as the first post-baseline kernel upgrade, ahead of Phase-4 V3b.
+- **Grid contact & axisymmetry are architectural.** Taylor/upsetting need grid
+  rigid-wall/multi-body contact (§3, M-list), and the axisymmetric-vs-3D choice
+  (§7 Phase 0) sets the discretization — neither can be bolted on late.
 
 **Proposed first step:** approve this baseline, then write a short
 `particle_method/docs/DESIGN.md` (the implementation contract, mirroring
