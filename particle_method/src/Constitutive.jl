@@ -18,7 +18,7 @@ using PlasticityFEM.FiniteStrain: finite_kinematics, finite_stress_update
 using PlasticityFEM.Materials: J2Material
 
 export particle_stress_update!, update_particles!, ParticleInversionError,
-       cell_Jbar!, ncells
+       FBarCellOutOfBoundsError, cell_Jbar!, ncells
 
 const I3 = SMatrix{3,3,Float64,9}(1, 0, 0, 0, 1, 0, 0, 0, 1)
 
@@ -57,12 +57,54 @@ Number of background cells `(nx-1)(ny-1)(nz-1)` used for F̄ cell binning
 """
 ncells(grid::Grid) = (grid.n[1] - 1) * (grid.n[2] - 1) * (grid.n[3] - 1)
 
-@inline function _cell_id(grid::Grid, x::SVector{3,Float64})
+"""
+    FBarCellOutOfBoundsError(p, x) <: Exception
+
+Thrown when a particle's position falls outside the plain background-cell
+grid used for F-bar volume averaging (DESIGN §4.2's `⌊x/h⌋` binning). This is
+the same class of "particle has left the grid" condition
+`Grid.ParticleOutOfBoundsError` guards for the B-spline stencil (DESIGN §8),
+caught here for F-bar's own binning pass: `update_particles!` runs *after*
+`G2P` has already advected particles to their new positions this step, so a
+particle that just drifted off the F-bar binning domain would otherwise only
+be caught one whole step later, by the *next* step's `bspline_stencil` OOB
+check — `_cell_id` previously `clamp`ed the index instead of raising, silently
+tolerating that window rather than failing loudly (DESIGN §8's "loud failure,
+never swallowed" philosophy, same as `ParticleInversionError`/
+`ParticleOutOfBoundsError`).
+"""
+struct FBarCellOutOfBoundsError <: Exception
+    p::Int
+    x::SVector{3,Float64}
+end
+
+function Base.showerror(io::IO, err::FBarCellOutOfBoundsError)
+    print(io, "FBarCellOutOfBoundsError: particle $(err.p) at x = $(err.x) is outside ",
+          "the F-bar background-cell grid. Pad the grid (DESIGN §8) — this is a setup ",
+          "error or an escaped particle, not a runtime state to tolerate.")
+end
+
+# Snap an axis' fractional cell coordinate `r` to its background-cell index,
+# tolerating only floating-point roundoff at the domain's exact boundary
+# planes (r ≈ 0 or r ≈ n-1, the legitimate case of a particle sitting exactly
+# on an outer node due to fp arithmetic) — NOT a general clamp. Returns an
+# out-of-range Int (caught by `_cell_id`'s bounds check) for any real escape.
+@inline function _snap_cell_axis(r::Float64, n::Int)
+    i = floor(Int, r)
+    (i < 0 && r > -1e-9) && return 0
+    (i > n - 2 && r < (n - 1) + 1e-9) && return n - 2
+    return i
+end
+
+@inline function _cell_id(grid::Grid, x::SVector{3,Float64}, p::Int=0)
     nx, ny, nz = grid.n
     r = (x - grid.origin) / grid.h
-    ix = clamp(floor(Int, r[1]), 0, nx - 2)
-    iy = clamp(floor(Int, r[2]), 0, ny - 2)
-    iz = clamp(floor(Int, r[3]), 0, nz - 2)
+    ix = _snap_cell_axis(r[1], nx)
+    iy = _snap_cell_axis(r[2], ny)
+    iz = _snap_cell_axis(r[3], nz)
+    if ix < 0 || ix > nx - 2 || iy < 0 || iy > ny - 2 || iz < 0 || iz > nz - 2
+        throw(FBarCellOutOfBoundsError(p, x))
+    end
     return 1 + ix + (nx - 1) * (iy + (ny - 1) * iz)
 end
 
@@ -80,7 +122,7 @@ function cell_Jbar!(Jnum::Vector{Float64}, Jden::Vector{Float64}, grid::Grid,
     fill!(Jnum, 0.0)
     fill!(Jden, 0.0)
     @inbounds for p in eachindex(pts.x)
-        c = _cell_id(grid, pts.x[p])
+        c = _cell_id(grid, pts.x[p], p)
         V0 = pts.V0[p]
         Jnum[c] += det(Ftrial[p]) * V0
         Jden[c] += V0
@@ -151,7 +193,7 @@ function update_particles!(pts::Particles, mat::J2Material, dt::Float64, grid::G
     if fbar
         cell_Jbar!(Jnum, Jden, grid, pts, Ftrial)
         @inbounds for p in 1:np
-            c = _cell_id(grid, pts.x[p])
+            c = _cell_id(grid, pts.x[p], p)
             Jbar = Jnum[c] / Jden[c]
             Jtrial = det(Ftrial[p])
             F = cbrt(Jbar / Jtrial) * Ftrial[p]

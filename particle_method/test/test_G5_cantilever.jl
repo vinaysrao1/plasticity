@@ -98,10 +98,29 @@ const FEM = PlasticityFEM
     fix!(model, x -> x[1] < 1e-9 && cross(x), :all)
     prescribe!(model, x -> x[1] > L - 1e-9 && cross(x), :z, vfun)
 
+    # Time-average the tail of the hold phase (last 30%), exactly as G3 does
+    # for its stress read (test_G3_tension.jl) — a single end-of-run snapshot
+    # can be biased by a slowly-decaying residual bending-mode oscillation
+    # (a different grid stiffness at different resolutions gives a different
+    # bending-mode period, hence a different phase at a fixed step count, a
+    # confound the last review flagged as a possible explanation for an
+    # apparently non-monotonic resolution sweep). Averaging the per-particle
+    # z-displacement over the tail removes that residual-ringing bias before
+    # any conclusion is drawn about discretization error.
     nsteps = Int(round((T_ramp + T_hold) / dt))
-    for _ in 1:nsteps
+    navg = max(1, Int(round(0.3 * nsteps)))
+    accum_dz = zeros(np)
+    nacc = 0
+    for s in 1:nsteps
         step!(model)
+        if s > nsteps - navg
+            for p in 1:np
+                accum_dz[p] += model.particles.x[p][3] - x0[p][3]
+            end
+            nacc += 1
+        end
     end
+    dz_avg = accum_dz ./ nacc
     ke_ie = kinetic_energy(model) / model.IE
     @printf("  G5  KE/IE = %.3e\n", ke_ie)
     @test ke_ie < 0.01
@@ -113,7 +132,7 @@ const FEM = PlasticityFEM
         fm = [abs(mesh.nodes[1, n] - xs) < 0.3 for n in 1:mesh.nnodes]
         push!(femdz, mean(u[3, fm]))
         mm = [abs(x0[p][1] - xs) < 0.3 for p in 1:np]
-        push!(mpmdz, mean(model.particles.x[p][3] - x0[p][3] for p in 1:np if mm[p]))
+        push!(mpmdz, mean(dz_avg[p] for p in 1:np if mm[p]))
     end
 
     @printf("  G5  station  FEM dz     MPM dz     ratio\n")

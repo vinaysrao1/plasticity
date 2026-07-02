@@ -109,6 +109,19 @@ const FEM = PlasticityFEM
         x = pts.x[p][1]
         s = 1.0 - amp * exp(-((x - x0i) / xwid)^2)
         pts.x[p] = SVector(pts.x[p][1], pts.x[p][2] * s, pts.x[p][3] * s)
+        # `sample_box` set V0 = dx^3 / m = ρ*V0 for the UNTAPERED lattice; the
+        # taper above shrinks the y/z extent by `s` (area by `s^2`) without
+        # touching x, so the true local reference volume/mass of a tapered
+        # particle is smaller by exactly `s^2` (area scaling, matching how the
+        # FEM reference derives element volumes from the already-tapered node
+        # geometry, lagrangian/src/Elements.jl). Not rescaling here left
+        # near-neck particles ~4% over-massed/over-volumed at this
+        # imperfection's 2% amplitude, over-weighting their contribution to
+        # `Vp = Jp*V0p` in the internal-force sum (Transfer.jl) — an
+        # artificial local stiffening in exactly the direction of the
+        # observed under-contraction.
+        pts.V0[p] *= s^2
+        pts.m[p] = ρ * pts.V0[p]
     end
     x0 = copy(pts.x)
 
@@ -127,10 +140,27 @@ const FEM = PlasticityFEM
     fix!(model, x -> x[3] < 1e-9, :z)
     prescribe!(model, x -> x[1] > L - 1e-9, :x, vfun)
 
+    # Time-average the tail of the hold phase (last 30%), exactly as G3 does
+    # for its stress read (test_G3_tension.jl), before taking the per-bin max
+    # reductions below — removes the residual-bending/ringing bias a single
+    # end-of-run snapshot can carry (see the same note in test_G5_cantilever.jl).
     nsteps = Int(round((T_ramp + T_hold) / dt))
-    for _ in 1:nsteps
+    navg = max(1, Int(round(0.3 * nsteps)))
+    accum_y = zeros(np)
+    accum_alpha = zeros(np)
+    nacc = 0
+    for s in 1:nsteps
         step!(model)
+        if s > nsteps - navg
+            for p in 1:np
+                accum_y[p] += model.particles.x[p][2]
+                accum_alpha[p] += model.particles.ᾱ[p]
+            end
+            nacc += 1
+        end
     end
+    y_avg = accum_y ./ nacc
+    alpha_avg = accum_alpha ./ nacc
     ke_ie = kinetic_energy(model) / model.IE
     @printf("  G6  KE/IE = %.3e\n", ke_ie)
     @test ke_ie < 0.01
@@ -139,8 +169,8 @@ const FEM = PlasticityFEM
     αbin_mpm = fill(0.0, nbin)
     for p in 1:np
         b = clamp(searchsortedlast(edges, x0[p][1]), 1, nbin)
-        halfw_mpm[b] = max(halfw_mpm[b], model.particles.x[p][2])
-        αbin_mpm[b] = max(αbin_mpm[b], model.particles.ᾱ[p])
+        halfw_mpm[b] = max(halfw_mpm[b], y_avg[p])
+        αbin_mpm[b] = max(αbin_mpm[b], alpha_avg[p])
     end
     wmin_mpm, imin_mpm = findmin(halfw_mpm)
     αmax_mpm, imax_mpm = findmax(αbin_mpm)
