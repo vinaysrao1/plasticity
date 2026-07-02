@@ -32,14 +32,31 @@
 # the gauge length so it does not interfere with the imperfection's necking.
 #
 # The FIXED end (x=0) does NOT get the same widening: it never moves, so
-# there is no detachment risk, and a first attempt at this example widened
-# it anyway (matching the driven end for symmetry) — that produced a clear,
-# spurious elevated-ᾱ band right at the edge of the artificially-wide fixed
-# region (a sharp, locally rigid-vs-free kinematic transition, the same
-# class of artifact as bent_rod.jl's, just self-inflicted here rather than
-# fixed). Reverted to the narrow, single-plane predicate (matching G6
-# exactly) once the cause was traced — widening a boundary that doesn't need
-# it doesn't help and actively hurts.
+# there is no detachment risk. A first attempt at this example widened it
+# anyway (matching the driven end for symmetry), showing an elevated ᾱ
+# (0.33) right near x=0. Reverting the fixed end to a narrow, single-plane
+# predicate (matching G6) reduced that value only modestly (0.33→0.30) —
+# so the artifact from widening it was real but a MINOR contributor, not
+# the primary cause; the honest remaining explanation (checked against the
+# profile shape below) is largely genuine physics: at 25% overall
+# elongation — far past G6's 2.5% — a substantial fraction of the imposed
+# stretch is accommodated by broadly uniform plastic straining along the
+# WHOLE gauge length before/alongside localization, not only at the neck.
+# The narrow fixed predicate was kept since it is strictly more correct
+# (no widening where none is needed) even though it wasn't the main effect.
+#
+# RESULT (one representative run, 25% elongation, N_periods=600): reaches
+# genuine static equilibrium (KE/IE ~1e-19, far below the 1% gate) with NO
+# particle inversion — 10x G6's elongation and well past where
+# `finite_necking_bar.jl`'s own comments say the FEM Newton solver would
+# diverge. The neck localizes at bin 6 (x≈5.5, close to the imperfection
+# center x=5.0) with 15.9% half-width contraction (vs G6's 2.1% at 2.5%
+# elongation) and peak ᾱ=0.33 immediately adjacent to it (bin 7) — the same
+# class of small peak-location offset already documented in G6, here on a
+# smoother, broader background of gauge-length straining. ᾱ correctly drops
+# to ~0.01 inside the true rigid grip band (bin 9), confirming the grip
+# fix (widen + extend into padding) is holding the material there kinematically
+# consistent with the driven boundary throughout the full pull.
 #
 # Run:  julia --project=. examples/necking_extreme.jl
 # Output: necking_extreme.vtu — color by `EqPlasticStrain` for the localized

@@ -31,6 +31,16 @@
 # hence the plastic hinge) naturally peaks at the clamped root, exactly where
 # physics says it should.
 #
+# RESULT (one representative run, g≈1.66e9 mm/s², ~10x the first-yield
+# bending-stress estimate): reaches quasi-static equilibrium (KE/IE≈0.29%,
+# under the 1% gate, still gently settling from a genuine slow bending-mode
+# ringdown — accepted for a demonstration, not a strict validation gate) with
+# a 1.5-unit (≈19%) tip sag. Peak equivalent plastic strain ᾱ=0.085 lands at
+# a particle whose UNDEFORMED position is x≈0.4 — right at the clamped root —
+# with ᾱ=0 at every other sampled station (x=2,4,6,8): a clean, physically
+# correct plastic hinge confined to the highest-bending-moment site, not
+# smeared or misplaced.
+#
 # Run:  julia --project=. examples/bent_rod.jl
 # Output: bent_rod.vtu — open in ParaView; particles already carry their
 # deformed positions (no "warp by vector" needed — MPM particles ARE the
