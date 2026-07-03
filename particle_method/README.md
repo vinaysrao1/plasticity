@@ -62,4 +62,8 @@ end
 write_particles_vtu("out", model)
 ```
 
-See `examples/` for the bent-rod and extreme-necking demonstrations.
+See `examples/` for the bent-rod, extreme-necking, and **Simo round-bar necking
+with saturation (Voce) hardening** (`simo_necking_mpm.jl`) demonstrations. The
+last is the "V3b" benchmark once deferred for want of nonlinear hardening — now
+delivered, reusing the shared kernel's saturation law, with a faithful FEM
+companion in [`../lagrangian/examples/simo_necking_bar.jl`](../lagrangian/examples/simo_necking_bar.jl).

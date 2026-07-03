@@ -5,6 +5,9 @@ using Test
     @testset "Materials" begin
         include("test_material.jl")
     end
+    @testset "SaturationHardening" begin
+        include("test_saturation.jl")
+    end
     @testset "Elements" begin
         include("test_element.jl")
     end
