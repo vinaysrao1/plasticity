@@ -48,6 +48,8 @@ mutable struct MPMModel
     fbar::Bool
     damping::Float64
     mass_scale::Float64
+    flip::Float64                                 # PIC/FLIP blend for the g2p velocity gather
+                                                  # (0 = pure APIC/PIC; →1 = FLIP, less dissipative)
     t::Float64
     step_count::Int
     IE::Float64                                   # accumulated internal energy (§6 diagnostic)
@@ -59,12 +61,12 @@ end
 
 function MPMModel(grid::Grid, particles::Particles, material::J2Material;
                    dt::Float64, fbar::Bool=false, damping::Float64=0.0,
-                   mass_scale::Float64=1.0,
+                   mass_scale::Float64=1.0, flip::Float64=0.0,
                    gravity::SVector{3,Float64}=zero(SVector{3,Float64}))
     np = length(particles)
     nc = ncells(grid)
     return MPMModel(grid, particles, material, VelocityBC[], ForceBC[], gravity, dt, fbar,
-                     damping, mass_scale, 0.0, 0, 0.0,
+                     damping, mass_scale, flip, 0.0, 0, 0.0,
                      Vector{SMatrix{3,3,Float64,9}}(undef, np),
                      zeros(Float64, nc), zeros(Float64, nc))
 end
@@ -163,7 +165,7 @@ function step!(model::MPMModel)
     apply_bcs!(g, model.bcs, model.t)
 
     # --- G2P ---
-    g2p!(g, pts, dt)
+    g2p!(g, pts, dt; flip = model.flip)
 
     # --- particle constitutive update (F-update, F̄, reused kernel) ---
     update_particles!(pts, model.material, dt, g; fbar=model.fbar,
