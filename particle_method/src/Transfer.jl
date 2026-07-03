@@ -53,36 +53,47 @@ function p2g!(grid::Grid, pts::Particles)
 end
 
 """
-    g2p!(grid, particles, dt)
+    g2p!(grid, particles, dt; flip=0.0)
 
 Grid → particles (DESIGN §4), after the grid momentum update (BCs already
 applied to `grid.v`):
-- `vₚ = Σᵢ wᵢₚ vᵢ*` (PIC velocity)
-- `Cₚ = (4/h²) Σᵢ wᵢₚ vᵢ* (xᵢ − xₚ)ᵀ` (APIC affine; exact `4/h²` for the
-  quadratic B-spline's constant inertia tensor `Dₚ = ¼h²I`, DESIGN §5)
-- `xₚ += Δt vₚ` (advect)
+- PIC velocity `vₚᴾᴵᶜ = Σᵢ wᵢₚ vᵢ*`
+- FLIP velocity `vₚꟳᴸᴵᴾ = vₚᵒˡᵈ + Σᵢ wᵢₚ (vᵢ* − vᵢᴾ²ᴳ)`, where `vᵢᴾ²ᴳ = pᵢ/mᵢ` is
+  the mass-weighted grid velocity BEFORE the force/damping update (`grid.p`,
+  `grid.m` still hold the P2G values here). FLIP carries the particle's own
+  velocity history instead of re-interpolating it, so it does not bleed the
+  sub-affine velocity field to numerical dissipation each step.
+- stored velocity is the blend `vₚ = (1−flip)·vₚᴾᴵᶜ + flip·vₚꟳᴸᴵᴾ`
+  (`flip=0` ⇒ pure APIC/PIC, unchanged; `flip→1` ⇒ FLIP, least dissipative).
+- `Cₚ = (4/h²) Σᵢ wᵢₚ vᵢ* (xᵢ − xₚ)ᵀ` (APIC affine — always from the grid field)
+- `xₚ += Δt vₚᴾᴵᶜ` (advect with the grid/PIC velocity, as in standard FLIP)
 
 Does **not** update `F`/stress — that is `Constitutive.update_particles!`.
 """
-function g2p!(grid::Grid, pts::Particles, dt::Float64)
+function g2p!(grid::Grid, pts::Particles, dt::Float64; flip::Float64=0.0)
     h = grid.h
     inv_D = 4.0 / (h * h)
     @inbounds for p in eachindex(pts.x)
         xp = pts.x[p]
         st = bspline_stencil(grid, xp, p)
-        vp = zero(SVector{3,Float64})
+        vpic = zero(SVector{3,Float64})     # Σ w vᵢ*        (PIC gather)
+        dvflip = zero(SVector{3,Float64})   # Σ w (vᵢ* − vᵢᴾ²ᴳ)  (FLIP increment)
         Bp = zero(SMatrix{3,3,Float64,9})
         for k in 1:27
             i = st.idx[k]
             w = st.w[k]
             vi = grid.v[i]
             dx = st.pos[k] - xp
-            vp += w * vi
+            vpic += w * vi
             Bp += (w * vi) * dx'
+            mi = grid.m[i]
+            vi_p2g = mi > 0.0 ? grid.p[i] / mi : zero(SVector{3,Float64})
+            dvflip += w * (vi - vi_p2g)
         end
-        pts.v[p] = vp
+        vflip = pts.v[p] + dvflip
+        pts.v[p] = (1.0 - flip) * vpic + flip * vflip
         pts.C[p] = inv_D * Bp
-        pts.x[p] = xp + dt * vp
+        pts.x[p] = xp + dt * vpic
     end
     return pts
 end

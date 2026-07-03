@@ -18,10 +18,12 @@
 #
 # F-bar ⇒ non-symmetric tangent ⇒ `solve!` auto-selects the direct (UMFPACK)
 # solver (CG+AMG is for the structured-box scaling path, not this graded mesh).
-# This is a sizeable run; reduce `ncross`/`naxial`/`nsteps` for a quick look.
-# Necking is a sharp localization: the F-bar Newton step is step-size sensitive,
-# so if a step fails to converge near the neck, increase `nsteps` (smaller load
-# increments). Run with threads for the assembly:
+# This is a sizeable run (120 load steps, direct solver); reduce
+# `ncross`/`naxial`/`nsteps` for a quick look. We pull to 9% elongation: by then
+# the neck is well developed (~11% radius reduction), and it stays below the ~9.6%
+# elongation at which a distorted grip-corner O-grid element folds (a mesh limit,
+# not a step-size issue — more `nsteps` does not push past it; a less distorted
+# grip mesh would). Run with threads for the assembly:
 #   julia -t auto --project=. examples/necking_titanium_bar.jl
 
 using PlasticityFEM
@@ -111,10 +113,11 @@ function main()
     fix!(model, on_face(mesh, :xmin))
     fix!(model, on_face(mesh, :xmax), :y)
     fix!(model, on_face(mesh, :xmax), :z)
-    elong = 0.12 * L                    # 12% nominal elongation (well past neck onset)
+    elong = 0.09 * L                    # 9% nominal elongation (well past neck onset;
+                                        # a grip-corner O-grid element folds near ~9.6%)
     prescribe!(model, on_face(mesh, :xmax), :x, elong)
 
-    res = solve!(model; nsteps = 60, tol = 1e-7, maxiter = 40)
+    res = solve!(model; nsteps = 120, tol = 1e-7, maxiter = 40)
 
     # --- postprocess: where did it neck? ---
     u  = nodal_displacements(model)
