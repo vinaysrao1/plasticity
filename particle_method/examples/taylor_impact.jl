@@ -22,8 +22,11 @@
 # Report: final length L_f (and L_f/L0), mushroom footprint radius, peak ᾱ, and the
 # deformed radius profile along the axis.
 #
-# COARSE quick pass (h≈0.8 ⇒ ~5 cells across the radius). Reduce H for a converged run.
-# Run:  julia --project=. examples/taylor_impact.jl
+# FINE mesh by default (h=0.15 ⇒ ~25 cells across the radius, ~660k particles). This is a
+# heavy run: ≈2 hours single-threaded (MPM's step! is serial) on an Apple M4 Max. For a
+# ~30 s coarse sanity pass, override `H=0.8`. Cost scales as (1/h)⁴.
+# Run:        julia --project=. examples/taylor_impact.jl          # fine, ~2 h
+# Quick look: H=0.8 julia --project=. examples/taylor_impact.jl    # coarse, ~30 s
 # Output: taylor_impact.vtu — color by EqPlasticStrain (mushroom), J (det F), VonMises.
 
 using ParticlePlasticity
@@ -41,8 +44,8 @@ mat = J2Material(E = E, ν = ν, σy0 = σy0, σsat = σsat, δ = δ, Hiso = His
 # --- impact velocity (mm/s); 2.5e5 mm/s = 250 m/s (ductile mushroom regime) ---
 v0 = parse(Float64, get(ENV, "V0", "2.5e5"))
 
-# --- discretization (COARSE quick pass; env-overridable) ---
-h = parse(Float64, get(ENV, "H", "0.8"))
+# --- discretization (FINE by default ≈2 h; set H=0.8 for a ~30 s coarse pass) ---
+h = parse(Float64, get(ENV, "H", "0.15"))
 flip = parse(Float64, get(ENV, "FLIP", "0.9"))   # PIC/FLIP blend (dynamics benefit from FLIP)
 damping = parse(Float64, get(ENV, "DAMP", "0.0"))# DYNAMIC: no quasi-static damping
 
